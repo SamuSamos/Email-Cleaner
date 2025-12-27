@@ -4,4 +4,4 @@ google-auth==2.24.0
 google-auth-oauthlib==1.2.0
 google-api-python-client==2.94.0
 eventlet==0.33.3
-gunicorn==21.2.0
+gunicorn==19.7.1
