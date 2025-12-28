@@ -1,6 +1,3 @@
-import eventlet
-eventlet.monkey_patch()  # IMPORTANT : patcher avant d'importer Flask, etc.
-
 from flask import Flask, render_template, redirect, request, session, jsonify
 from flask_socketio import SocketIO, emit
 import os, base64, math
@@ -12,6 +9,12 @@ from google.oauth2.credentials import Credentials
 import secrets
 import json
 
+# ======================
+# Eventlet patching must be first
+# ======================
+import eventlet
+eventlet.monkey_patch()
+
 # Autoriser HTTP pour dev local
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
@@ -22,6 +25,7 @@ socketio = SocketIO(app, async_mode="eventlet")
 # ======================
 # Google OAuth
 # ======================
+
 CLIENT_SECRETS_FILE = "client_secret.json"
 if not os.path.exists(CLIENT_SECRETS_FILE):
     raise RuntimeError(f"Le fichier {CLIENT_SECRETS_FILE} est introuvable !")
@@ -31,15 +35,16 @@ with open(CLIENT_SECRETS_FILE, "r") as f:
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
-# Redirect URI selon environnement
+# Gestion automatique redirect URI
 if os.environ.get("RENDER") == "true":  # Render définit cette variable
     REDIRECT_URI = "https://email-cleaner-bxsc.onrender.com/oauth2callback"
 else:
     REDIRECT_URI = "http://localhost:5000/oauth2callback"
 
 # ======================
-# Helpers
+# Helper
 # ======================
+
 def credentials_to_dict(c):
     return {
         "token": c.token,
@@ -57,20 +62,28 @@ def gmail_service():
     return build("gmail", "v1", credentials=creds)
 
 def decode(value):
-    parts = decode_header(value)
-    out = ""
-    for txt, enc in parts:
-        if isinstance(txt, bytes):
-            out += txt.decode(enc or "utf-8", errors="ignore")
-        else:
-            out += txt
-    return out
+    try:
+        parts = decode_header(value)
+        out = ""
+        for txt, enc in parts:
+            if isinstance(txt, bytes):
+                try:
+                    out += txt.decode(enc or "utf-8", errors="ignore")
+                except:
+                    out += txt.decode("latin1", errors="ignore")
+            else:
+                out += str(txt)
+        return out
+    except Exception as e:
+        print("⚠️ Erreur de décodage:", e)
+        return value or ""
 
 processing = False
 
 # ======================
 # Routes OAuth
 # ======================
+
 @app.route("/login")
 def login():
     flow = Flow.from_client_config(
@@ -95,6 +108,7 @@ def oauth2callback():
 # ======================
 # Routes UI
 # ======================
+
 @app.route("/")
 def index():
     return render_template("index.html", connected="credentials" in session)
@@ -110,6 +124,7 @@ def labels():
 # ======================
 # SocketIO Email Processing
 # ======================
+
 @socketio.on("process_emails")
 def process_emails(data):
     global processing
@@ -145,8 +160,23 @@ def process_emails(data):
             email_msg = message_from_bytes(raw)
 
             sender = decode(email_msg.get("From", ""))
+            if not sender:
+                sender = "(unknown)"
+
             match_keyword = any(k in sender.lower() for k in keywords)
-            has_attachment = any(part.get_filename() for part in email_msg.walk())
+
+            # Vérification robuste des attachments
+            has_attachment = False
+            for part in email_msg.walk():
+                try:
+                    if part.get_content_maintype() == "multipart":
+                        continue
+                    if part.get_filename():
+                        has_attachment = True
+                        break
+                except:
+                    continue
+
             conserve = match_keyword or (keep_attachments and has_attachment)
 
             if not conserve and not simulate:
@@ -160,11 +190,13 @@ def process_emails(data):
                  f"conserve = {conserve}\n"
                  f"{'-'*40}"
             )
-        except Exception as e:
-            emit("log", f"⚠️ Erreur sur le mail {meta['id']}: {e}")
 
-        emit("progress", math.floor(i / total * 100))
-        socketio.sleep(0.03)
+            emit("progress", math.floor(i / total * 100))
+            socketio.sleep(0.03)
+
+        except Exception as e:
+            emit("log", f"⚠️ Erreur sur un mail: {e}")
+            continue
 
     processing = False
     emit("log", "✅ Traitement terminé")
@@ -177,6 +209,7 @@ def stop():
 # ======================
 # Run
 # ======================
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     socketio.run(app, host="0.0.0.0", port=port)
