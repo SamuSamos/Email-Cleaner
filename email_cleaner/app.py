@@ -9,7 +9,7 @@ from google.oauth2.credentials import Credentials
 import secrets
 import json
 
-# Autoriser HTTP (dev)
+# Autoriser HTTP (uniquement pour dev)
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
 app = Flask(__name__)
@@ -20,7 +20,6 @@ socketio = SocketIO(app, async_mode="eventlet")
 # Google OAuth
 # ======================
 
-# Lire le JSON depuis la variable d'environnement
 CLIENT_SECRETS_JSON = os.environ.get("GOOGLE_CLIENT_SECRET")
 if not CLIENT_SECRETS_JSON:
     raise RuntimeError("La variable d'environnement GOOGLE_CLIENT_SECRET n'est pas définie !")
@@ -32,7 +31,7 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 REDIRECT_URI = "https://email-cleaner-bxsc.onrender.com/oauth2callback"
 
 # ======================
-# Helper
+# Helpers
 # ======================
 
 def credentials_to_dict(c):
