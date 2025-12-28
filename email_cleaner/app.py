@@ -1,3 +1,6 @@
+import eventlet
+eventlet.monkey_patch()  # IMPORTANT : patcher avant d'importer Flask, etc.
+
 from flask import Flask, render_template, redirect, request, session, jsonify
 from flask_socketio import SocketIO, emit
 import os, base64, math
@@ -8,12 +11,6 @@ from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 import secrets
 import json
-
-# ======================
-# Eventlet patch must be first
-# ======================
-import eventlet
-eventlet.monkey_patch()
 
 # Autoriser HTTP pour dev local
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
@@ -34,14 +31,14 @@ with open(CLIENT_SECRETS_FILE, "r") as f:
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
-REDIRECT_URI = (
-    "https://email-cleaner-bxsc.onrender.com/oauth2callback"
-    if os.environ.get("RENDER") == "true"
-    else "http://localhost:5000/oauth2callback"
-)
+# Redirect URI selon environnement
+if os.environ.get("RENDER") == "true":  # Render définit cette variable
+    REDIRECT_URI = "https://email-cleaner-bxsc.onrender.com/oauth2callback"
+else:
+    REDIRECT_URI = "http://localhost:5000/oauth2callback"
 
 # ======================
-# Helper
+# Helpers
 # ======================
 def credentials_to_dict(c):
     return {
@@ -60,22 +57,19 @@ def gmail_service():
     return build("gmail", "v1", credentials=creds)
 
 def decode(value):
-    try:
-        parts = decode_header(value)
-        out = ""
-        for txt, enc in parts:
-            if isinstance(txt, bytes):
-                out += txt.decode(enc or "utf-8", errors="ignore")
-            else:
-                out += str(txt)
-        return out
-    except:
-        return value or ""
+    parts = decode_header(value)
+    out = ""
+    for txt, enc in parts:
+        if isinstance(txt, bytes):
+            out += txt.decode(enc or "utf-8", errors="ignore")
+        else:
+            out += txt
+    return out
 
 processing = False
 
 # ======================
-# OAuth routes
+# Routes OAuth
 # ======================
 @app.route("/login")
 def login():
@@ -99,7 +93,7 @@ def oauth2callback():
     return redirect("/")
 
 # ======================
-# UI routes
+# Routes UI
 # ======================
 @app.route("/")
 def index():
@@ -114,7 +108,7 @@ def labels():
     return jsonify(res.get("labels", []))
 
 # ======================
-# SocketIO processing
+# SocketIO Email Processing
 # ======================
 @socketio.on("process_emails")
 def process_emails(data):
@@ -133,6 +127,7 @@ def process_emails(data):
 
     messages = []
     request_api = service.users().messages().list(userId="me", q=query, maxResults=500)
+
     while request_api and processing:
         response = request_api.execute()
         messages.extend(response.get("messages", []))
@@ -151,7 +146,6 @@ def process_emails(data):
 
             sender = decode(email_msg.get("From", ""))
             match_keyword = any(k in sender.lower() for k in keywords)
-
             has_attachment = any(part.get_filename() for part in email_msg.walk())
             conserve = match_keyword or (keep_attachments and has_attachment)
 
@@ -166,11 +160,11 @@ def process_emails(data):
                  f"conserve = {conserve}\n"
                  f"{'-'*40}"
             )
-            emit("progress", math.floor(i / total * 100))
-            socketio.sleep(0.03)
         except Exception as e:
-            emit("log", f"⚠️ Erreur sur un mail: {e}")
-            continue
+            emit("log", f"⚠️ Erreur sur le mail {meta['id']}: {e}")
+
+        emit("progress", math.floor(i / total * 100))
+        socketio.sleep(0.03)
 
     processing = False
     emit("log", "✅ Traitement terminé")
