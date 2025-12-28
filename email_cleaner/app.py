@@ -1,12 +1,11 @@
 from flask import Flask, render_template, redirect, request, session, jsonify
 from flask_socketio import SocketIO, emit
-import os, base64, math, json
+import os, base64, math, json, secrets
 from email import message_from_bytes
 from email.header import decode_header
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
-import secrets
 
 # Autoriser HTTP pour dev local
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
@@ -29,13 +28,13 @@ with open(CLIENT_SECRETS_FILE, "r") as f:
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
 # Gestion automatique redirect URI
-if os.environ.get("RENDER") == "true":  # Render définit cette variable
+if os.environ.get("RENDER") == "true":
     REDIRECT_URI = "https://email-cleaner-bxsc.onrender.com/oauth2callback"
 else:
     REDIRECT_URI = "http://localhost:5000/oauth2callback"
 
 # ======================
-# Helpers
+# Helper
 # ======================
 
 def credentials_to_dict(c):
@@ -51,13 +50,8 @@ def credentials_to_dict(c):
 def gmail_service():
     if "credentials" not in session:
         return None
-    try:
-        creds = Credentials(**session["credentials"])
-        service = build("gmail", "v1", credentials=creds)
-        return service
-    except Exception as e:
-        print("Erreur création service Gmail :", e)
-        return None
+    creds = Credentials(**session["credentials"])
+    return build("gmail", "v1", credentials=creds)
 
 def decode(value):
     parts = decode_header(value)
@@ -77,19 +71,20 @@ processing = False
 
 @app.route("/login")
 def login():
-    try:
-        flow = Flow.from_client_config(
-            CLIENT_CONFIG,
-            scopes=SCOPES,
-            redirect_uri=REDIRECT_URI
-        )
-        auth_url, _ = flow.authorization_url(prompt="consent")
-        return redirect(auth_url)
-    except Exception as e:
-        return f"Erreur login OAuth : {e}"
+    flow = Flow.from_client_config(
+        CLIENT_CONFIG,
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI
+    )
+    auth_url, _ = flow.authorization_url(prompt="consent")
+    return redirect(auth_url)
 
 @app.route("/oauth2callback")
 def oauth2callback():
+    # Eviter la récursion infinie
+    if "credentials" in session:
+        return redirect("/")
+
     try:
         flow = Flow.from_client_config(
             CLIENT_CONFIG,
@@ -119,8 +114,7 @@ def labels():
         res = service.users().labels().list(userId="me").execute()
         return jsonify(res.get("labels", []))
     except Exception as e:
-        print("Erreur récupération labels :", e)
-        return jsonify([])
+        return jsonify({"error": str(e)})
 
 # ======================
 # SocketIO Email Processing
@@ -135,23 +129,19 @@ def process_emails(data):
         return
 
     processing = True
-    keywords = [k.strip().lower() for k in data.get("keywords", "").split(",") if k]
-    keep_attachments = data.get("keepAttachments", False)
-    simulate = data.get("simulate", True)
-    label_id = data.get("label", "ALL")
+    keywords = [k.strip().lower() for k in data["keywords"].split(",") if k]
+    keep_attachments = data["keepAttachments"]
+    simulate = data["simulate"]
+    label_id = data["label"]
     query = "" if label_id == "ALL" else f"label:{label_id}"
 
     messages = []
-    try:
-        request_api = service.users().messages().list(userId="me", q=query, maxResults=500)
-        while request_api and processing:
-            response = request_api.execute()
-            messages.extend(response.get("messages", []))
-            request_api = service.users().messages().list_next(request_api, response)
-    except Exception as e:
-        emit("log", f"Erreur récupération messages : {e}")
-        processing = False
-        return
+    request_api = service.users().messages().list(userId="me", q=query, maxResults=500)
+
+    while request_api and processing:
+        response = request_api.execute()
+        messages.extend(response.get("messages", []))
+        request_api = service.users().messages().list_next(request_api, response)
 
     total = len(messages)
     emit("log", f"📨 {total} mails trouvés")
@@ -183,7 +173,7 @@ def process_emails(data):
             emit("progress", math.floor(i / total * 100))
             socketio.sleep(0.03)
         except Exception as e:
-            emit("log", f"Erreur traitement message {i} : {e}")
+            emit("log", f"Erreur traitement email {i}: {e}")
 
     processing = False
     emit("log", "✅ Traitement terminé")
