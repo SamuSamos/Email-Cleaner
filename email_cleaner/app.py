@@ -1,5 +1,5 @@
 import eventlet
-eventlet.monkey_patch()  # IMPORTANT : patcher avant d'importer Flask, etc.
+eventlet.monkey_patch()  # doit être appelé en tout premier
 
 from flask import Flask, render_template, redirect, request, session, jsonify
 from flask_socketio import SocketIO, emit
@@ -22,6 +22,7 @@ socketio = SocketIO(app, async_mode="eventlet")
 # ======================
 # Google OAuth
 # ======================
+
 CLIENT_SECRETS_FILE = "client_secret.json"
 if not os.path.exists(CLIENT_SECRETS_FILE):
     raise RuntimeError(f"Le fichier {CLIENT_SECRETS_FILE} est introuvable !")
@@ -31,15 +32,16 @@ with open(CLIENT_SECRETS_FILE, "r") as f:
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
-# Redirect URI selon environnement
-if os.environ.get("RENDER") == "true":  # Render définit cette variable
+# Gestion automatique redirect URI
+if os.environ.get("RENDER") == "true":
     REDIRECT_URI = "https://email-cleaner-bxsc.onrender.com/oauth2callback"
 else:
     REDIRECT_URI = "http://localhost:5000/oauth2callback"
 
 # ======================
-# Helpers
+# Helper
 # ======================
+
 def credentials_to_dict(c):
     return {
         "token": c.token,
@@ -61,7 +63,10 @@ def decode(value):
     out = ""
     for txt, enc in parts:
         if isinstance(txt, bytes):
-            out += txt.decode(enc or "utf-8", errors="ignore")
+            try:
+                out += txt.decode(enc or "utf-8", errors="ignore")
+            except Exception:
+                out += txt.decode("utf-8", errors="ignore")
         else:
             out += txt
     return out
@@ -71,6 +76,7 @@ processing = False
 # ======================
 # Routes OAuth
 # ======================
+
 @app.route("/login")
 def login():
     flow = Flow.from_client_config(
@@ -95,6 +101,7 @@ def oauth2callback():
 # ======================
 # Routes UI
 # ======================
+
 @app.route("/")
 def index():
     return render_template("index.html", connected="credentials" in session)
@@ -110,6 +117,7 @@ def labels():
 # ======================
 # SocketIO Email Processing
 # ======================
+
 @socketio.on("process_emails")
 def process_emails(data):
     global processing
@@ -129,7 +137,11 @@ def process_emails(data):
     request_api = service.users().messages().list(userId="me", q=query, maxResults=500)
 
     while request_api and processing:
-        response = request_api.execute()
+        try:
+            response = request_api.execute()
+        except Exception as e:
+            emit("log", f"⚠️ Erreur API Gmail list : {e}")
+            break
         messages.extend(response.get("messages", []))
         request_api = service.users().messages().list_next(request_api, response)
 
@@ -143,25 +155,39 @@ def process_emails(data):
             msg = service.users().messages().get(userId="me", id=meta["id"], format="raw").execute()
             raw = base64.urlsafe_b64decode(msg["raw"])
             email_msg = message_from_bytes(raw)
-
-            sender = decode(email_msg.get("From", ""))
-            match_keyword = any(k in sender.lower() for k in keywords)
-            has_attachment = any(part.get_filename() for part in email_msg.walk())
-            conserve = match_keyword or (keep_attachments and has_attachment)
-
-            if not conserve and not simulate:
-                service.users().messages().trash(userId="me", id=meta["id"]).execute()
-
-            emit("log",
-                 f"{i}/{total}\n"
-                 f"From: {sender}\n"
-                 f"match_keyword = {match_keyword}\n"
-                 f"has_attachment = {has_attachment}\n"
-                 f"conserve = {conserve}\n"
-                 f"{'-'*40}"
-            )
         except Exception as e:
-            emit("log", f"⚠️ Erreur sur le mail {meta['id']}: {e}")
+            emit("log", f"⚠️ Impossible de lire le mail {i} : {e}")
+            continue
+
+        sender = decode(email_msg.get("From", ""))
+        match_keyword = any(k in sender.lower() for k in keywords)
+
+        # Gestion robuste des pièces jointes
+        has_attachment = False
+        try:
+            for part in email_msg.walk():
+                if part.get_filename():
+                    has_attachment = True
+                    break
+        except Exception as e:
+            emit("log", f"⚠️ Impossible de lire attachments mail {i} : {e}")
+
+        conserve = match_keyword or (keep_attachments and has_attachment)
+
+        if not conserve and not simulate:
+            try:
+                service.users().messages().trash(userId="me", id=meta["id"]).execute()
+            except Exception as e:
+                emit("log", f"⚠️ Impossible de supprimer mail {i} : {e}")
+
+        emit("log",
+             f"{i}/{total}\n"
+             f"From: {sender}\n"
+             f"match_keyword = {match_keyword}\n"
+             f"has_attachment = {has_attachment}\n"
+             f"conserve = {conserve}\n"
+             f"{'-'*40}"
+        )
 
         emit("progress", math.floor(i / total * 100))
         socketio.sleep(0.03)
@@ -177,6 +203,7 @@ def stop():
 # ======================
 # Run
 # ======================
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     socketio.run(app, host="0.0.0.0", port=port)
