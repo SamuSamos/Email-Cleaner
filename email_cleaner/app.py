@@ -1,13 +1,12 @@
 from flask import Flask, render_template, redirect, request, session, jsonify
 from flask_socketio import SocketIO, emit
-import os, base64, math
+import os, base64, math, json
 from email import message_from_bytes
 from email.header import decode_header
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 import secrets
-import json
 
 # Autoriser HTTP pour dev local
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
@@ -32,10 +31,11 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 # Gestion automatique redirect URI
 if os.environ.get("RENDER") == "true":  # Render définit cette variable
     REDIRECT_URI = "https://email-cleaner-bxsc.onrender.com/oauth2callback"
-
+else:
+    REDIRECT_URI = "http://localhost:5000/oauth2callback"
 
 # ======================
-# Helper
+# Helpers
 # ======================
 
 def credentials_to_dict(c):
@@ -51,8 +51,13 @@ def credentials_to_dict(c):
 def gmail_service():
     if "credentials" not in session:
         return None
-    creds = Credentials(**session["credentials"])
-    return build("gmail", "v1", credentials=creds)
+    try:
+        creds = Credentials(**session["credentials"])
+        service = build("gmail", "v1", credentials=creds)
+        return service
+    except Exception as e:
+        print("Erreur création service Gmail :", e)
+        return None
 
 def decode(value):
     parts = decode_header(value)
@@ -72,24 +77,30 @@ processing = False
 
 @app.route("/login")
 def login():
-    flow = Flow.from_client_config(
-        CLIENT_CONFIG,
-        scopes=SCOPES,
-        redirect_uri=REDIRECT_URI
-    )
-    auth_url, _ = flow.authorization_url(prompt="consent")
-    return redirect(auth_url)
+    try:
+        flow = Flow.from_client_config(
+            CLIENT_CONFIG,
+            scopes=SCOPES,
+            redirect_uri=REDIRECT_URI
+        )
+        auth_url, _ = flow.authorization_url(prompt="consent")
+        return redirect(auth_url)
+    except Exception as e:
+        return f"Erreur login OAuth : {e}"
 
 @app.route("/oauth2callback")
 def oauth2callback():
-    flow = Flow.from_client_config(
-        CLIENT_CONFIG,
-        scopes=SCOPES,
-        redirect_uri=REDIRECT_URI
-    )
-    flow.fetch_token(authorization_response=request.url)
-    session["credentials"] = credentials_to_dict(flow.credentials)
-    return redirect("/")
+    try:
+        flow = Flow.from_client_config(
+            CLIENT_CONFIG,
+            scopes=SCOPES,
+            redirect_uri=REDIRECT_URI
+        )
+        flow.fetch_token(authorization_response=request.url)
+        session["credentials"] = credentials_to_dict(flow.credentials)
+        return redirect("/")
+    except Exception as e:
+        return f"Erreur OAuth callback : {e}"
 
 # ======================
 # Routes UI
@@ -104,8 +115,12 @@ def labels():
     service = gmail_service()
     if not service:
         return jsonify([])
-    res = service.users().labels().list(userId="me").execute()
-    return jsonify(res.get("labels", []))
+    try:
+        res = service.users().labels().list(userId="me").execute()
+        return jsonify(res.get("labels", []))
+    except Exception as e:
+        print("Erreur récupération labels :", e)
+        return jsonify([])
 
 # ======================
 # SocketIO Email Processing
@@ -120,19 +135,23 @@ def process_emails(data):
         return
 
     processing = True
-    keywords = [k.strip().lower() for k in data["keywords"].split(",") if k]
-    keep_attachments = data["keepAttachments"]
-    simulate = data["simulate"]
-    label_id = data["label"]
+    keywords = [k.strip().lower() for k in data.get("keywords", "").split(",") if k]
+    keep_attachments = data.get("keepAttachments", False)
+    simulate = data.get("simulate", True)
+    label_id = data.get("label", "ALL")
     query = "" if label_id == "ALL" else f"label:{label_id}"
 
     messages = []
-    request_api = service.users().messages().list(userId="me", q=query, maxResults=500)
-
-    while request_api and processing:
-        response = request_api.execute()
-        messages.extend(response.get("messages", []))
-        request_api = service.users().messages().list_next(request_api, response)
+    try:
+        request_api = service.users().messages().list(userId="me", q=query, maxResults=500)
+        while request_api and processing:
+            response = request_api.execute()
+            messages.extend(response.get("messages", []))
+            request_api = service.users().messages().list_next(request_api, response)
+    except Exception as e:
+        emit("log", f"Erreur récupération messages : {e}")
+        processing = False
+        return
 
     total = len(messages)
     emit("log", f"📨 {total} mails trouvés")
@@ -140,30 +159,31 @@ def process_emails(data):
     for i, meta in enumerate(messages, start=1):
         if not processing:
             break
-        msg = service.users().messages().get(userId="me", id=meta["id"], format="raw").execute()
-        raw = base64.urlsafe_b64decode(msg["raw"])
-        email_msg = message_from_bytes(raw)
+        try:
+            msg = service.users().messages().get(userId="me", id=meta["id"], format="raw").execute()
+            raw = base64.urlsafe_b64decode(msg["raw"])
+            email_msg = message_from_bytes(raw)
 
-        sender = decode(email_msg.get("From", ""))
-        match_keyword = any(k in sender.lower() for k in keywords)
+            sender = decode(email_msg.get("From", ""))
+            match_keyword = any(k in sender.lower() for k in keywords)
+            has_attachment = any(part.get_filename() for part in email_msg.walk())
+            conserve = match_keyword or (keep_attachments and has_attachment)
 
-        has_attachment = any(part.get_filename() for part in email_msg.walk())
-        conserve = match_keyword or (keep_attachments and has_attachment)
+            if not conserve and not simulate:
+                service.users().messages().trash(userId="me", id=meta["id"]).execute()
 
-        if not conserve and not simulate:
-            service.users().messages().trash(userId="me", id=meta["id"]).execute()
-
-        emit("log",
-             f"{i}/{total}\n"
-             f"From: {sender}\n"
-             f"match_keyword = {match_keyword}\n"
-             f"has_attachment = {has_attachment}\n"
-             f"conserve = {conserve}\n"
-             f"{'-'*40}"
-        )
-
-        emit("progress", math.floor(i / total * 100))
-        socketio.sleep(0.03)
+            emit("log",
+                 f"{i}/{total}\n"
+                 f"From: {sender}\n"
+                 f"match_keyword = {match_keyword}\n"
+                 f"has_attachment = {has_attachment}\n"
+                 f"conserve = {conserve}\n"
+                 f"{'-'*40}"
+            )
+            emit("progress", math.floor(i / total * 100))
+            socketio.sleep(0.03)
+        except Exception as e:
+            emit("log", f"Erreur traitement message {i} : {e}")
 
     processing = False
     emit("log", "✅ Traitement terminé")
