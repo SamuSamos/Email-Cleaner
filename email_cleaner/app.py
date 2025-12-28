@@ -1,13 +1,15 @@
 from flask import Flask, render_template, redirect, request, session, jsonify
 from flask_socketio import SocketIO, emit
-import os, base64, math, json, secrets
+import os, base64, math
 from email import message_from_bytes
 from email.header import decode_header
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
+import secrets
+import json
 
-# Autoriser HTTP (pour dev)
+# Autoriser HTTP pour dev local
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
 app = Flask(__name__)
@@ -18,25 +20,23 @@ socketio = SocketIO(app, async_mode="eventlet")
 # Google OAuth
 # ======================
 
-# Priorité à la variable d'environnement, sinon fichier local
-CLIENT_SECRETS_JSON = os.environ.get("GOOGLE_CLIENT_SECRET")
+CLIENT_SECRETS_FILE = "client_secret.json"
+if not os.path.exists(CLIENT_SECRETS_FILE):
+    raise RuntimeError(f"Le fichier {CLIENT_SECRETS_FILE} est introuvable !")
 
-if CLIENT_SECRETS_JSON:
-    CLIENT_CONFIG = json.loads(CLIENT_SECRETS_JSON)
-elif os.path.exists("client_secret.json"):
-    with open("client_secret.json", "r") as f:
-        CLIENT_CONFIG = json.load(f)
-else:
-    raise RuntimeError(
-        "Erreur : aucune configuration OAuth trouvée ! "
-        "Définissez la variable GOOGLE_CLIENT_SECRET ou placez client_secret.json"
-    )
+with open(CLIENT_SECRETS_FILE, "r") as f:
+    CLIENT_CONFIG = json.load(f)
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
-REDIRECT_URI = "https://email-cleaner-bxsc.onrender.com/oauth2callback"
+
+# Gestion automatique redirect URI
+if os.environ.get("RENDER") == "true":  # Render définit cette variable
+    REDIRECT_URI = "https://email-cleaner-bxsc.onrender.com/oauth2callback"
+else:
+    REDIRECT_URI = "http://localhost:5000/oauth2callback"
 
 # ======================
-# Helpers
+# Helper
 # ======================
 
 def credentials_to_dict(c):
