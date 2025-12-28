@@ -32,8 +32,7 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 # Gestion automatique redirect URI
 if os.environ.get("RENDER") == "true":  # Render définit cette variable
     REDIRECT_URI = "https://email-cleaner-bxsc.onrender.com/oauth2callback"
-else:
-    REDIRECT_URI = "http://localhost:5000/oauth2callback"
+
 
 # ======================
 # Helper
