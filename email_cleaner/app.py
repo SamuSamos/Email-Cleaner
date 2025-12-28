@@ -1,8 +1,6 @@
-# ====================== Patch Eventlet en premier ======================
 import eventlet
-eventlet.monkey_patch()
+eventlet.monkey_patch()  # IMPORTANT : patcher avant d'importer Flask, etc.
 
-# ====================== Imports ======================
 from flask import Flask, render_template, redirect, request, session, jsonify
 from flask_socketio import SocketIO, emit
 import os, base64, math
@@ -14,14 +12,16 @@ from google.oauth2.credentials import Credentials
 import secrets
 import json
 
-# ====================== Config Flask ======================
-os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"  # Autoriser HTTP pour dev local
+# Autoriser HTTP pour dev local
+os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
 socketio = SocketIO(app, async_mode="eventlet")
 
-# ====================== Google OAuth ======================
+# ======================
+# Google OAuth
+# ======================
 CLIENT_SECRETS_FILE = "client_secret.json"
 if not os.path.exists(CLIENT_SECRETS_FILE):
     raise RuntimeError(f"Le fichier {CLIENT_SECRETS_FILE} est introuvable !")
@@ -37,7 +37,9 @@ if os.environ.get("RENDER") == "true":  # Render définit cette variable
 else:
     REDIRECT_URI = "http://localhost:5000/oauth2callback"
 
-# ====================== Helpers ======================
+# ======================
+# Helpers
+# ======================
 def credentials_to_dict(c):
     return {
         "token": c.token,
@@ -66,7 +68,9 @@ def decode(value):
 
 processing = False
 
-# ====================== Routes OAuth ======================
+# ======================
+# Routes OAuth
+# ======================
 @app.route("/login")
 def login():
     flow = Flow.from_client_config(
@@ -88,11 +92,12 @@ def oauth2callback():
     session["credentials"] = credentials_to_dict(flow.credentials)
     return redirect("/")
 
-# ====================== Routes UI ======================
+# ======================
+# Routes UI
+# ======================
 @app.route("/")
 def index():
-    connected = "credentials" in session
-    return render_template("index.html", connected=connected)
+    return render_template("index.html", connected="credentials" in session)
 
 @app.route("/labels")
 def labels():
@@ -102,7 +107,9 @@ def labels():
     res = service.users().labels().list(userId="me").execute()
     return jsonify(res.get("labels", []))
 
-# ====================== SocketIO Email Processing ======================
+# ======================
+# SocketIO Email Processing
+# ======================
 @socketio.on("process_emails")
 def process_emails(data):
     global processing
@@ -120,6 +127,7 @@ def process_emails(data):
 
     messages = []
     request_api = service.users().messages().list(userId="me", q=query, maxResults=500)
+
     while request_api and processing:
         response = request_api.execute()
         messages.extend(response.get("messages", []))
@@ -131,26 +139,30 @@ def process_emails(data):
     for i, meta in enumerate(messages, start=1):
         if not processing:
             break
-        msg = service.users().messages().get(userId="me", id=meta["id"], format="raw").execute()
-        raw = base64.urlsafe_b64decode(msg["raw"])
-        email_msg = message_from_bytes(raw)
+        try:
+            msg = service.users().messages().get(userId="me", id=meta["id"], format="raw").execute()
+            raw = base64.urlsafe_b64decode(msg["raw"])
+            email_msg = message_from_bytes(raw)
 
-        sender = decode(email_msg.get("From", ""))
-        match_keyword = any(k in sender.lower() for k in keywords)
-        has_attachment = any(part.get_filename() for part in email_msg.walk())
-        conserve = match_keyword or (keep_attachments and has_attachment)
+            sender = decode(email_msg.get("From", ""))
+            match_keyword = any(k in sender.lower() for k in keywords)
+            has_attachment = any(part.get_filename() for part in email_msg.walk())
+            conserve = match_keyword or (keep_attachments and has_attachment)
 
-        if not conserve and not simulate:
-            service.users().messages().trash(userId="me", id=meta["id"]).execute()
+            if not conserve and not simulate:
+                service.users().messages().trash(userId="me", id=meta["id"]).execute()
 
-        emit("log",
-             f"{i}/{total}\n"
-             f"From: {sender}\n"
-             f"match_keyword = {match_keyword}\n"
-             f"has_attachment = {has_attachment}\n"
-             f"conserve = {conserve}\n"
-             f"{'-'*40}"
-        )
+            emit("log",
+                 f"{i}/{total}\n"
+                 f"From: {sender}\n"
+                 f"match_keyword = {match_keyword}\n"
+                 f"has_attachment = {has_attachment}\n"
+                 f"conserve = {conserve}\n"
+                 f"{'-'*40}"
+            )
+        except Exception as e:
+            emit("log", f"⚠️ Erreur sur le mail {meta['id']}: {e}")
+
         emit("progress", math.floor(i / total * 100))
         socketio.sleep(0.03)
 
@@ -162,7 +174,9 @@ def stop():
     global processing
     processing = False
 
-# ====================== Run ======================
+# ======================
+# Run
+# ======================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     socketio.run(app, host="0.0.0.0", port=port)
