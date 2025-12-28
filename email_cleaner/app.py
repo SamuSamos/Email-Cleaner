@@ -3,51 +3,37 @@ from flask_socketio import SocketIO, emit
 import os, base64, math
 from email import message_from_bytes
 from email.header import decode_header
-
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 import secrets
+import json
 
+# Autoriser HTTP (dev)
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
 app = Flask(__name__)
-
 app.secret_key = secrets.token_hex(32)
 socketio = SocketIO(app, async_mode="eventlet")
 
-CLIENT_SECRETS_FILE = "client_secret.json"
+# ======================
+# Google OAuth
+# ======================
+
+# Lire le JSON depuis la variable d'environnement
+CLIENT_SECRETS_JSON = os.environ.get("GOOGLE_CLIENT_SECRET")
+if not CLIENT_SECRETS_JSON:
+    raise RuntimeError("La variable d'environnement GOOGLE_CLIENT_SECRET n'est pas définie !")
+
+CLIENT_CONFIG = json.loads(CLIENT_SECRETS_JSON)
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
-processing = False
-
+# Redirect URI pour Render
+REDIRECT_URI = "https://email-cleaner-bxsc.onrender.com/oauth2callback"
 
 # ======================
-# OAuth
+# Helper
 # ======================
-
-@app.route("/login")
-def login():
-    flow = Flow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE,
-        scopes=SCOPES,
-        redirect_uri="http://localhost:5000/oauth2callback"
-    )
-    auth_url, _ = flow.authorization_url(prompt="consent")
-    return redirect(auth_url)
-
-
-@app.route("/oauth2callback")
-def oauth2callback():
-    flow = Flow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE,
-        scopes=SCOPES,
-        redirect_uri="http://localhost:5000/oauth2callback"
-    )
-    flow.fetch_token(authorization_response=request.url)
-    session["credentials"] = credentials_to_dict(flow.credentials)
-    return redirect("/")
-
 
 def credentials_to_dict(c):
     return {
@@ -59,35 +45,67 @@ def credentials_to_dict(c):
         "scopes": c.scopes
     }
 
-
 def gmail_service():
     if "credentials" not in session:
         return None
     creds = Credentials(**session["credentials"])
     return build("gmail", "v1", credentials=creds)
 
+def decode(value):
+    parts = decode_header(value)
+    out = ""
+    for txt, enc in parts:
+        if isinstance(txt, bytes):
+            out += txt.decode(enc or "utf-8", errors="ignore")
+        else:
+            out += txt
+    return out
+
+processing = False
 
 # ======================
-# UI
+# Routes OAuth
+# ======================
+
+@app.route("/login")
+def login():
+    flow = Flow.from_client_config(
+        CLIENT_CONFIG,
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI
+    )
+    auth_url, _ = flow.authorization_url(prompt="consent")
+    return redirect(auth_url)
+
+@app.route("/oauth2callback")
+def oauth2callback():
+    flow = Flow.from_client_config(
+        CLIENT_CONFIG,
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI
+    )
+    flow.fetch_token(authorization_response=request.url)
+    session["credentials"] = credentials_to_dict(flow.credentials)
+    return redirect("/")
+
+# ======================
+# Routes UI
 # ======================
 
 @app.route("/")
 def index():
     return render_template("index.html", connected="credentials" in session)
 
-
 @app.route("/labels")
 def labels():
     service = gmail_service()
     if not service:
         return jsonify([])
-
     res = service.users().labels().list(userId="me").execute()
     return jsonify(res.get("labels", []))
 
-
 # ======================
-# EMAIL PROCESSING
+# SocketIO Email Processing
 # ======================
 
 @socketio.on("process_emails")
@@ -99,12 +117,10 @@ def process_emails(data):
         return
 
     processing = True
-
     keywords = [k.strip().lower() for k in data["keywords"].split(",") if k]
     keep_attachments = data["keepAttachments"]
     simulate = data["simulate"]
     label_id = data["label"]
-
     query = "" if label_id == "ALL" else f"label:{label_id}"
 
     messages = []
@@ -121,25 +137,14 @@ def process_emails(data):
     for i, meta in enumerate(messages, start=1):
         if not processing:
             break
-
-        msg = service.users().messages().get(
-            userId="me",
-            id=meta["id"],
-            format="raw"
-        ).execute()
-
+        msg = service.users().messages().get(userId="me", id=meta["id"], format="raw").execute()
         raw = base64.urlsafe_b64decode(msg["raw"])
         email_msg = message_from_bytes(raw)
 
         sender = decode(email_msg.get("From", ""))
         match_keyword = any(k in sender.lower() for k in keywords)
 
-        has_attachment = False
-        for part in email_msg.walk():
-            if part.get_filename():
-                has_attachment = True
-                break
-
+        has_attachment = any(part.get_filename() for part in email_msg.walk())
         conserve = match_keyword or (keep_attachments and has_attachment)
 
         if not conserve and not simulate:
@@ -160,24 +165,15 @@ def process_emails(data):
     processing = False
     emit("log", "✅ Traitement terminé")
 
-
 @socketio.on("stop")
 def stop():
     global processing
     processing = False
 
-
-def decode(value):
-    parts = decode_header(value)
-    out = ""
-    for txt, enc in parts:
-        if isinstance(txt, bytes):
-            out += txt.decode(enc or "utf-8", errors="ignore")
-        else:
-            out += txt
-    return out
-
+# ======================
+# Run
+# ======================
 
 if __name__ == "__main__":
-    port = int(os.environ.get('PORT', 5000))
-    socketio.run(app, host='0.0.0.0', port=port)
+    port = int(os.environ.get("PORT", 5000))
+    socketio.run(app, host="0.0.0.0", port=port)
