@@ -81,9 +81,13 @@ def login():
 
 @app.route("/oauth2callback")
 def oauth2callback():
-    # Eviter la récursion infinie
+    # Si on a déjà les credentials, on retourne à l'accueil
     if "credentials" in session:
         return redirect("/")
+
+    # Vérifier que Google nous renvoie un code OAuth
+    if "code" not in request.args:
+        return redirect("/login")
 
     try:
         flow = Flow.from_client_config(
