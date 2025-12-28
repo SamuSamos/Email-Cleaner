@@ -10,7 +10,7 @@ import secrets
 import json
 
 # ======================
-# Eventlet patching must be first
+# Eventlet patch must be first
 # ======================
 import eventlet
 eventlet.monkey_patch()
@@ -25,7 +25,6 @@ socketio = SocketIO(app, async_mode="eventlet")
 # ======================
 # Google OAuth
 # ======================
-
 CLIENT_SECRETS_FILE = "client_secret.json"
 if not os.path.exists(CLIENT_SECRETS_FILE):
     raise RuntimeError(f"Le fichier {CLIENT_SECRETS_FILE} est introuvable !")
@@ -35,16 +34,15 @@ with open(CLIENT_SECRETS_FILE, "r") as f:
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
-# Gestion automatique redirect URI
-if os.environ.get("RENDER") == "true":  # Render définit cette variable
-    REDIRECT_URI = "https://email-cleaner-bxsc.onrender.com/oauth2callback"
-else:
-    REDIRECT_URI = "http://localhost:5000/oauth2callback"
+REDIRECT_URI = (
+    "https://email-cleaner-bxsc.onrender.com/oauth2callback"
+    if os.environ.get("RENDER") == "true"
+    else "http://localhost:5000/oauth2callback"
+)
 
 # ======================
 # Helper
 # ======================
-
 def credentials_to_dict(c):
     return {
         "token": c.token,
@@ -67,23 +65,18 @@ def decode(value):
         out = ""
         for txt, enc in parts:
             if isinstance(txt, bytes):
-                try:
-                    out += txt.decode(enc or "utf-8", errors="ignore")
-                except:
-                    out += txt.decode("latin1", errors="ignore")
+                out += txt.decode(enc or "utf-8", errors="ignore")
             else:
                 out += str(txt)
         return out
-    except Exception as e:
-        print("⚠️ Erreur de décodage:", e)
+    except:
         return value or ""
 
 processing = False
 
 # ======================
-# Routes OAuth
+# OAuth routes
 # ======================
-
 @app.route("/login")
 def login():
     flow = Flow.from_client_config(
@@ -106,9 +99,8 @@ def oauth2callback():
     return redirect("/")
 
 # ======================
-# Routes UI
+# UI routes
 # ======================
-
 @app.route("/")
 def index():
     return render_template("index.html", connected="credentials" in session)
@@ -122,9 +114,8 @@ def labels():
     return jsonify(res.get("labels", []))
 
 # ======================
-# SocketIO Email Processing
+# SocketIO processing
 # ======================
-
 @socketio.on("process_emails")
 def process_emails(data):
     global processing
@@ -142,7 +133,6 @@ def process_emails(data):
 
     messages = []
     request_api = service.users().messages().list(userId="me", q=query, maxResults=500)
-
     while request_api and processing:
         response = request_api.execute()
         messages.extend(response.get("messages", []))
@@ -160,23 +150,9 @@ def process_emails(data):
             email_msg = message_from_bytes(raw)
 
             sender = decode(email_msg.get("From", ""))
-            if not sender:
-                sender = "(unknown)"
-
             match_keyword = any(k in sender.lower() for k in keywords)
 
-            # Vérification robuste des attachments
-            has_attachment = False
-            for part in email_msg.walk():
-                try:
-                    if part.get_content_maintype() == "multipart":
-                        continue
-                    if part.get_filename():
-                        has_attachment = True
-                        break
-                except:
-                    continue
-
+            has_attachment = any(part.get_filename() for part in email_msg.walk())
             conserve = match_keyword or (keep_attachments and has_attachment)
 
             if not conserve and not simulate:
@@ -190,10 +166,8 @@ def process_emails(data):
                  f"conserve = {conserve}\n"
                  f"{'-'*40}"
             )
-
             emit("progress", math.floor(i / total * 100))
             socketio.sleep(0.03)
-
         except Exception as e:
             emit("log", f"⚠️ Erreur sur un mail: {e}")
             continue
@@ -209,7 +183,6 @@ def stop():
 # ======================
 # Run
 # ======================
-
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     socketio.run(app, host="0.0.0.0", port=port)
