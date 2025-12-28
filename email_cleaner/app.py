@@ -1,5 +1,5 @@
 # ======================
-# EVENTLET (DOIT ÊTRE EN PREMIER)
+# EVENTLET (OBLIGATOIRE EN PREMIER)
 # ======================
 import eventlet
 eventlet.monkey_patch()
@@ -9,15 +9,13 @@ eventlet.monkey_patch()
 # ======================
 from flask import Flask, render_template, redirect, request, session, jsonify
 from flask_socketio import SocketIO, emit
-import os, base64, math, json, secrets, gc
-from email import message_from_bytes
-from email.header import decode_header
+import os, math, secrets, json, gc
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 
 # ======================
-# Config Flask
+# Flask
 # ======================
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
@@ -29,9 +27,6 @@ socketio = SocketIO(app, async_mode="eventlet", cors_allowed_origins="*")
 # Google OAuth
 # ======================
 CLIENT_SECRETS_FILE = "client_secret.json"
-if not os.path.exists(CLIENT_SECRETS_FILE):
-    raise RuntimeError("client_secret.json introuvable")
-
 with open(CLIENT_SECRETS_FILE, "r") as f:
     CLIENT_CONFIG = json.load(f)
 
@@ -53,7 +48,7 @@ def credentials_to_dict(c):
         "token_uri": c.token_uri,
         "client_id": c.client_id,
         "client_secret": c.client_secret,
-        "scopes": c.scopes
+        "scopes": c.scopes,
     }
 
 def gmail_service():
@@ -62,20 +57,20 @@ def gmail_service():
     creds = Credentials(**session["credentials"])
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
-def decode_header_safe(value):
-    if not value:
-        return ""
-    try:
-        parts = decode_header(value)
-        out = ""
-        for txt, enc in parts:
-            if isinstance(txt, bytes):
-                out += txt.decode(enc or "utf-8", errors="ignore")
-            else:
-                out += txt
-        return out
-    except Exception:
-        return "[Décodage impossible]"
+def get_header(headers, name):
+    for h in headers:
+        if h["name"].lower() == name.lower():
+            return h["value"]
+    return ""
+
+def has_attachment(payload):
+    parts = payload.get("parts", [])
+    for p in parts:
+        if p.get("filename"):
+            return True
+    return False
+
+processing = False
 
 # ======================
 # OAuth Routes
@@ -85,27 +80,24 @@ def login():
     flow = Flow.from_client_config(
         CLIENT_CONFIG,
         scopes=SCOPES,
-        redirect_uri=REDIRECT_URI
+        redirect_uri=REDIRECT_URI,
     )
     auth_url, _ = flow.authorization_url(prompt="consent")
     return redirect(auth_url)
 
 @app.route("/oauth2callback")
 def oauth2callback():
-    try:
-        flow = Flow.from_client_config(
-            CLIENT_CONFIG,
-            scopes=SCOPES,
-            redirect_uri=REDIRECT_URI
-        )
-        flow.fetch_token(authorization_response=request.url)
-        session["credentials"] = credentials_to_dict(flow.credentials)
-        return redirect("/")
-    except Exception as e:
-        return f"Erreur OAuth callback : {str(e)}", 500
+    flow = Flow.from_client_config(
+        CLIENT_CONFIG,
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI,
+    )
+    flow.fetch_token(authorization_response=request.url)
+    session["credentials"] = credentials_to_dict(flow.credentials)
+    return redirect("/")
 
 # ======================
-# UI Routes
+# UI
 # ======================
 @app.route("/")
 def index():
@@ -120,15 +112,12 @@ def labels():
     return jsonify(res.get("labels", []))
 
 # ======================
-# SocketIO – Email Processing
+# SocketIO – Processing
 # ======================
-processing = False
-
 @socketio.on("process_emails")
 def process_emails(data):
     global processing
     service = gmail_service()
-
     if not service:
         emit("log", "❌ Non connecté à Gmail")
         return
@@ -142,9 +131,19 @@ def process_emails(data):
 
     query = "" if label_id == "ALL" else f"label:{label_id}"
 
-    emit("log", "🔍 Récupération des mails...")
-    count = 0
+    # ======================
+    # FIRST CALL → TOTAL
+    # ======================
+    first = service.users().messages().list(
+        userId="me",
+        q=query,
+        maxResults=1
+    ).execute()
 
+    total = first.get("resultSizeEstimate", 0)
+    emit("log", f"📨 {total} mails trouvés")
+
+    i = 0
     request_api = service.users().messages().list(
         userId="me",
         q=query,
@@ -158,47 +157,48 @@ def process_emails(data):
             if not processing:
                 break
 
-            try:
-                count += 1
+            i += 1
 
+            try:
                 msg = service.users().messages().get(
                     userId="me",
                     id=meta["id"],
-                    format="raw"
+                    format="metadata",
+                    metadataHeaders=["From"]
                 ).execute()
 
-                raw = base64.urlsafe_b64decode(msg["raw"])
-                email_msg = message_from_bytes(raw)
-
-                sender = decode_header_safe(email_msg.get("From"))
+                headers = msg["payload"].get("headers", [])
+                sender = get_header(headers, "From")
                 sender_l = sender.lower()
 
                 match_keyword = any(k in sender_l for k in keywords)
-                has_attachment = any(p.get_filename() for p in email_msg.walk())
-                conserve = match_keyword or (keep_attachments and has_attachment)
+                attachment = has_attachment(msg["payload"])
+                conserve = match_keyword or (keep_attachments and attachment)
 
                 if not conserve and not simulate:
-                    service.users().messages().trash(userId="me", id=meta["id"]).execute()
+                    service.users().messages().trash(
+                        userId="me",
+                        id=meta["id"]
+                    ).execute()
 
                 emit("log",
-                    f"{count}\n"
+                    f"{i}/{total}\n"
                     f"From: {sender}\n"
                     f"match_keyword = {match_keyword}\n"
-                    f"has_attachment = {has_attachment}\n"
+                    f"has_attachment = {attachment}\n"
                     f"conserve = {conserve}\n"
                     f"{'-'*40}"
                 )
 
-                emit("progress", min(100, count))
+                emit("progress", math.floor(i / total * 100))
 
             except Exception as e:
-                emit("log", f"⚠️ Mail ignoré (erreur): {e}")
+                emit("log", f"{i}/{total} ⚠️ Mail ignoré ({e})")
 
             finally:
-                # 🔥 LIBÉRATION MÉMOIRE (CRITIQUE)
-                del msg, raw, email_msg
+                del msg
                 gc.collect()
-                socketio.sleep(0.05)
+                socketio.sleep(0.03)
 
         request_api = service.users().messages().list_next(request_api, response)
 
