@@ -130,7 +130,11 @@ def process_emails(data):
     simulate = data["simulate"]
     label_id = data["label"]
 
-    query = "" if label_id == "ALL" else f"label:{label_id}"
+    if label_id == "ALL":
+        query = "in:anywhere"
+    else:
+        query = f"in:anywhere label:{label_id}"
+
 
     # -------- PHASE 1 : comptage réel --------
     emit("log", "🔍 Comptage des mails…")
