@@ -130,11 +130,16 @@ def process_emails(data):
     simulate = data["simulate"]
     label_id = data["label"]
 
-    if label_id == "ALL":
-        query = "in:anywhere"
-    else:
-        query = f"in:anywhere label:{label_id}"
+    # ---------------------------
+    # CORRECTION ICI ✅
+    # ---------------------------
+    list_kwargs = {
+        "userId": "me",
+        "q": "in:anywhere"
+    }
 
+    if label_id != "ALL":
+        list_kwargs["labelIds"] = [label_id]
 
     # -------- PHASE 1 : comptage réel --------
     emit("log", "🔍 Comptage des mails…")
@@ -144,9 +149,8 @@ def process_emails(data):
 
     while processing:
         res = service.users().messages().list(
-            userId="me",
-            q=query,
-            pageToken=page_token
+            pageToken=page_token,
+            **list_kwargs
         ).execute()
 
         all_ids.extend(res.get("messages", []))
@@ -181,12 +185,9 @@ def process_emails(data):
 
             has_attachment = False
             for part in email_msg.walk():
-                try:
-                    if part.get_filename():
-                        has_attachment = True
-                        break
-                except Exception:
-                    continue
+                if part.get_filename():
+                    has_attachment = True
+                    break
 
             conserve = match_keyword or (keep_attachments and has_attachment)
 
